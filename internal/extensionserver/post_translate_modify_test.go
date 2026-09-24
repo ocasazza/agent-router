@@ -20,11 +20,13 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -247,6 +249,103 @@ func TestInsertAIGatewayExtProcFilter(t *testing.T) {
 					require.Equal(t, originalFilter.Name, mgr.HttpFilters[i+1].Name, "filter at position %d should be shifted by 1", i)
 				}
 			}
+		})
+	}
+}
+
+func TestPatchListenerWithInferencePoolFiltersHasStableUniqueEPPOrder(t *testing.T) {
+	makePool := func(name, namespace string) *gwaiev1.InferencePool {
+		return &gwaiev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: gwaiev1.InferencePoolSpec{
+				TargetPorts: []gwaiev1.Port{{Number: 8080}},
+				EndpointPickerRef: &gwaiev1.EndpointPickerRef{
+					Name: "test-epp",
+				},
+			},
+		}
+	}
+
+	poolZeta := makePool("zeta", "ns-b")
+	poolAlphaB := makePool("alpha", "ns-b")
+	poolAlphaA := makePool("alpha", "ns-a")
+	poolZetaDuplicate := makePool("zeta", "ns-b")
+	tests := []struct {
+		name  string
+		pools []*gwaiev1.InferencePool
+	}{
+		{
+			name:  "unsorted pools with duplicate",
+			pools: []*gwaiev1.InferencePool{poolZeta, poolAlphaB, poolAlphaA, poolZetaDuplicate},
+		},
+		{
+			name:  "different pool permutation with duplicate",
+			pools: []*gwaiev1.InferencePool{poolAlphaA, poolZetaDuplicate, poolAlphaB, poolZeta},
+		},
+	}
+	wantNames := []string{
+		"envoy.filters.http.jwt_authn",
+		aiGatewayExtProcName,
+		"envoy.filters.http.ratelimit",
+		"envoy.filters.http.ext_proc/endpointpicker/alpha_ns-a_ext_proc",
+		"envoy.filters.http.ext_proc/endpointpicker/alpha_ns-b_ext_proc",
+		"envoy.filters.http.ext_proc/endpointpicker/zeta_ns-b_ext_proc",
+		wellknown.Router,
+	}
+
+	bufferedAny, err := anypb.New(&extprocv3.ExternalProcessor{
+		ProcessingMode: &extprocv3.ProcessingMode{
+			RequestBodyMode:  extprocv3.ProcessingMode_BUFFERED,
+			ResponseBodyMode: extprocv3.ProcessingMode_BUFFERED,
+		},
+	})
+	require.NoError(t, err)
+	existingNonEPPFilters := []*httpconnectionmanagerv3.HttpFilter{
+		{Name: "envoy.filters.http.jwt_authn"},
+		{
+			Name: aiGatewayExtProcName,
+			ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{
+				TypedConfig: bufferedAny,
+			},
+		},
+		{Name: "envoy.filters.http.ratelimit"},
+	}
+	server := &Server{log: logr.Discard()}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hcm := &httpconnectionmanagerv3.HttpConnectionManager{
+				HttpFilters: append(
+					append([]*httpconnectionmanagerv3.HttpFilter(nil), existingNonEPPFilters...),
+					&httpconnectionmanagerv3.HttpFilter{Name: wellknown.Router},
+				),
+			}
+			hcmAny, err := anypb.New(hcm)
+			require.NoError(t, err)
+			listener := &listenerv3.Listener{
+				Name: "test-listener",
+				DefaultFilterChain: &listenerv3.FilterChain{
+					Filters: []*listenerv3.Filter{{
+						Name:       wellknown.HTTPConnectionManager,
+						ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+					}},
+				},
+			}
+
+			server.patchListenerWithInferencePoolFilters(listener, tt.pools)
+
+			gotHCM := &httpconnectionmanagerv3.HttpConnectionManager{}
+			err = listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(gotHCM)
+			require.NoError(t, err)
+			gotNames := make([]string, len(gotHCM.HttpFilters))
+			for i, filter := range gotHCM.HttpFilters {
+				gotNames[i] = filter.Name
+			}
+			require.Equal(t, wantNames, gotNames)
+			for i, filter := range existingNonEPPFilters {
+				require.True(t, proto.Equal(filter, gotHCM.HttpFilters[i]), "existing filter at %d changed", i)
+			}
+			require.Equal(t, wellknown.Router, gotHCM.HttpFilters[len(gotHCM.HttpFilters)-1].Name)
 		})
 	}
 }

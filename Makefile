@@ -315,6 +315,24 @@ else
 	@$(MAKE) docker-build.testextauthserver CMD_PATH_PREFIX=tests/internal/testextauth DOCKER_BUILD_ARGS="--load"
 endif
 
+# Build the controller/extproc pair from one clean commit and one linker version.
+MATCHED_OCI_REPOSITORY_PREFIX ?= us-central1-docker.pkg.dev/it-ops-nixstation/superlog/ai-gateway
+MATCHED_DOCKER_BUILD_ARGS ?= --load
+.PHONY: docker-build.controller-extproc
+docker-build.controller-extproc: ## Build matching linux/amd64 controller and extproc images.
+	@set -eu; \
+	test -z "$$(git status --porcelain)" || { echo "matched image build requires a clean checkout" >&2; exit 1; }; \
+	source_revision="$$(git rev-parse --verify HEAD)"; \
+	version_string="$(VERSION_STRING)"; \
+	$(MAKE) --no-print-directory \
+		TAG="$$source_revision" \
+		VERSION_STRING="$$version_string" \
+		OCI_REPOSITORY_PREFIX="$(MATCHED_OCI_REPOSITORY_PREFIX)" \
+		GOARCH_LIST=amd64 \
+		PLATFORMS="--platform linux/amd64" \
+		DOCKER_BUILD_ARGS="$(MATCHED_DOCKER_BUILD_ARGS)" \
+		docker-build.controller docker-build.extproc
+
 # This builds a docker image for a given command.
 #
 # Example:

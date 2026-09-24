@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -772,8 +773,31 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 	return nil
 }
 
+func sortAndDeduplicateInferencePools(inferencePools []*gwaiev1.InferencePool) []*gwaiev1.InferencePool {
+	sort.SliceStable(inferencePools, func(i, j int) bool {
+		nameI, nameJ := inferencePools[i].GetName(), inferencePools[j].GetName()
+		if nameI != nameJ {
+			return nameI < nameJ
+		}
+		return inferencePools[i].GetNamespace() < inferencePools[j].GetNamespace()
+	})
+
+	uniquePools := inferencePools[:0]
+	var previousName, previousNamespace string
+	for _, pool := range inferencePools {
+		name, namespace := pool.GetName(), pool.GetNamespace()
+		if len(uniquePools) != 0 && name == previousName && namespace == previousNamespace {
+			continue
+		}
+		uniquePools = append(uniquePools, pool)
+		previousName, previousNamespace = name, namespace
+	}
+	return uniquePools
+}
+
 // patchListenerWithInferencePoolFilters adds the necessary HTTP filters to the listener to support InferencePool backends.
 func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.Listener, inferencePools []*gwaiev1.InferencePool) {
+	inferencePools = sortAndDeduplicateInferencePools(inferencePools)
 	// First, get the filter chains from the listener.
 	filterChains := listener.GetFilterChains()
 	defaultFC := listener.DefaultFilterChain
