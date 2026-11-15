@@ -592,10 +592,10 @@ func mediaResolutionAvailable(requestModel internalapi.RequestModel) bool {
 	return strings.Contains(requestModel, "gemini") && strings.Contains(requestModel, "3")
 }
 
-// reasoningEffortAvailable checks if the model supports reasoning effort.
-// Only Gemini 3.0+ models support this feature for controlling reasoning depth.
+// reasoningEffortAvailable checks whether the served model accepts reasoning_effort.
+// Gemini 3 models and gemini-4-hydrogen support it.
 func reasoningEffortAvailable(requestModel internalapi.RequestModel) bool {
-	return strings.Contains(requestModel, "gemini") && strings.Contains(requestModel, "3")
+	return requestModel == "gemini-4-hydrogen" || strings.Contains(requestModel, "gemini") && strings.Contains(requestModel, "3")
 }
 
 // isGeminiFlashModel checks if the model is a Gemini Flash model.
@@ -603,14 +603,26 @@ func isGeminiFlashModel(model internalapi.RequestModel) bool {
 	return strings.Contains(strings.ToLower(model), "flash")
 }
 
-// mapReasoningEffortToThinkingLevel converts OpenAI reasoning effort levels to Gemini thinking levels.
-// The mapping depends on the model type:
-// - "none" → ThinkingLevelMinimal (Gemini Flash only)
-// - "low" → ThinkingLevelLow
-// - "medium" → ThinkingLevelMedium for Flash, ThinkingLevelHigh for Pro
-// - "high" → ThinkingLevelHigh
-// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/get-started-with-gemini-3#openai-example
+// mapReasoningEffortToThinkingLevel maps OpenAI reasoning_effort to native Gemini levels.
+// Hydrogen maps minimal to LOW; Gemini 3 mappings depend on Flash/Pro support.
 func mapReasoningEffortToThinkingLevel(reasonEffort openai.ReasoningEffort, model internalapi.RequestModel) (genai.ThinkingLevel, error) {
+	if model == "gemini-4-hydrogen" {
+		switch reasonEffort {
+		case openai.ReasoningEffortLow:
+			return genai.ThinkingLevelLow, nil
+		case openai.ReasoningEffortMedium:
+			return genai.ThinkingLevelMedium, nil
+		case openai.ReasoningEffortHigh:
+			return genai.ThinkingLevelHigh, nil
+		case openai.ReasoningEffortXhigh:
+			return genai.ThinkingLevel("XHIGH"), nil
+		case openai.ReasoningEffort("minimal"):
+			return genai.ThinkingLevelLow, nil
+		default:
+			return "", fmt.Errorf("%w: unsupported reasoning effort level: %q (supported: minimal, low, medium, high, xhigh)", internalapi.ErrInvalidRequestBody, reasonEffort)
+		}
+	}
+
 	isFlash := isGeminiFlashModel(model)
 
 	switch reasonEffort {
@@ -751,6 +763,10 @@ func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest, 
 		}
 		gc.ThinkingConfig = &genai.ThinkingConfig{
 			ThinkingLevel: thinkLevel,
+		}
+	} else if requestModel == "gemini-4-hydrogen" && openAIReq.Thinking == nil {
+		gc.ThinkingConfig = &genai.ThinkingConfig{
+			ThinkingLevel: genai.ThinkingLevelLow,
 		}
 	}
 
