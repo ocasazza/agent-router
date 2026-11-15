@@ -818,6 +818,109 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 		})
 	}
 }
+func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_HydrogenReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name                   string
+		model                  string
+		modelNameOverride      internalapi.ModelNameOverride
+		reasoningEffort        openai.ReasoningEffort
+		expectedThinkingLevel  string
+		expectedThinkingBudget int
+		explicitThinking       bool
+		wantError              bool
+	}{
+		{
+			name:                  "omitted defaults to low",
+			expectedThinkingLevel: string(genai.ThinkingLevelLow),
+		},
+		{
+			name:                  "low",
+			reasoningEffort:       openai.ReasoningEffortLow,
+			expectedThinkingLevel: string(genai.ThinkingLevelLow),
+			model:                 "hydrogen-client-alias",
+			modelNameOverride:     "gemini-4-hydrogen",
+		},
+		{
+			name:                  "medium",
+			reasoningEffort:       openai.ReasoningEffortMedium,
+			expectedThinkingLevel: string(genai.ThinkingLevelMedium),
+		},
+		{
+			name:                  "high",
+			reasoningEffort:       openai.ReasoningEffortHigh,
+			expectedThinkingLevel: string(genai.ThinkingLevelHigh),
+		},
+		{
+			name:                  "xhigh",
+			reasoningEffort:       openai.ReasoningEffortXhigh,
+			expectedThinkingLevel: "XHIGH",
+		},
+		{
+			name:                  "minimal uses lowest supported level",
+			reasoningEffort:       openai.ReasoningEffort("minimal"),
+			expectedThinkingLevel: string(genai.ThinkingLevelLow),
+		},
+		{
+			name:            "none is unsupported",
+			reasoningEffort: openai.ReasoningEffortNone,
+			wantError:       true,
+		},
+		{
+			name:                   "explicit structured thinking takes precedence",
+			expectedThinkingBudget: 512,
+			explicitThinking:       true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			model := tc.model
+			if model == "" {
+				model = "gemini-4-hydrogen"
+			}
+			req := &openai.ChatCompletionRequest{
+				Model:           model,
+				ReasoningEffort: tc.reasoningEffort,
+				MaxTokens:       ptr.To(int64(30)),
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Reply briefly."},
+					}},
+				},
+			}
+			if tc.explicitThinking {
+				req.Thinking = &openai.ThinkingUnion{
+					OfEnabled: &openai.ThinkingEnabled{
+						Type:         "enabled",
+						BudgetTokens: 512,
+					},
+				}
+			}
+
+			_, body, err := NewChatCompletionOpenAIToGCPVertexAITranslator(tc.modelNameOverride).RequestBody(nil, req, false)
+			if tc.wantError {
+				require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+				return
+			}
+			require.NoError(t, err)
+
+			var got struct {
+				GenerationConfig struct {
+					MaxOutputTokens int `json:"maxOutputTokens"`
+					ThinkingConfig  struct {
+						ThinkingLevel  string `json:"thinkingLevel"`
+						ThinkingBudget int    `json:"thinkingBudget"`
+					} `json:"thinkingConfig"`
+				} `json:"generationConfig"`
+			}
+			require.NoError(t, json.Unmarshal(body, &got))
+			assert.Equal(t, 30, got.GenerationConfig.MaxOutputTokens)
+			assert.Equal(t, tc.expectedThinkingLevel, got.GenerationConfig.ThinkingConfig.ThinkingLevel)
+			assert.Equal(t, tc.expectedThinkingBudget, got.GenerationConfig.ThinkingConfig.ThinkingBudget)
+		})
+	}
+}
 
 func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_ResponseHeaders(t *testing.T) {
 	tests := []struct {
